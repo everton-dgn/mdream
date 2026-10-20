@@ -914,6 +914,14 @@ it.each(['\t', '\n', '\f', '\r', ' ', '\u000B'])('holds trimmable override white
   }
 })
 
+it('preserves vertical tabs with a literal opening-side emphasis pair', async () => {
+  const html = 'a<em>!b&#11; </em>c'
+  const expected = 'a*!b*\u000B c'
+  expect(htmlToMarkdown(html)).toBe(expected)
+  for (let width = 1; width <= html.length; width++)
+    expect(await streamConvert(html, width), `width ${width}`).toBe(expected)
+})
+
 describe('vertical tabs before emphasis closers', () => {
   for (const [tag, marker] of [['em', '*'], ['i', '*'], ['strong', '**'], ['b', '**'], ['cite', '*'], ['dfn', '**'], ['del', '~~'], ['s', '~~'], ['strike', '~~']]) {
     for (const suffix of ['\u000B', '\u000B ', '\u000B\u000B ', '\u000B \t', ' \u000B', '\u000B \u000B ']) {

@@ -6088,6 +6088,22 @@ fn code_span_restores_an_opener_moved_by_a_blockquote() {
 }
 
 #[test]
+fn vertical_tabs_with_literal_opening_side_emphasis() {
+  let html = "a<em>!b&#11; </em>c";
+  let expected = "a*!b*\u{000b} c";
+  assert_eq!(convert(html), expected);
+  for width in 1..=html.len() {
+    let mut stream = MarkdownStreamProcessor::new(HtmlToMarkdownOptions::default());
+    let mut output = String::new();
+    for chunk in html.as_bytes().chunks(width) {
+      output.push_str(&stream.process_chunk(std::str::from_utf8(chunk).unwrap()));
+    }
+    output.push_str(&stream.finish());
+    assert_eq!(output, expected, "width={width}");
+  }
+}
+
+#[test]
 fn vertical_tabs_before_emphasis_closers() {
   for (tag, marker) in [
     ("em", "*"),

@@ -7,6 +7,7 @@ type TestEngine = (typeof engines)[number]['engine']
 // Closing delimiters use a reference before an ASCII word after punctuation.
 // Opening-side cases retain their existing Markdown output.
 const cases: [string, string][] = [
+  ['a<em>!b&#11; </em>c', 'a*!b*\u000B c'],
   ['<p><strong><a href="/x">b</a> </strong><kbd><b>c</b></kbd></p>', '**[b](/x)** `**c**`'],
   ['<p><strong><a href="/x">b</a> </strong><code><em>c</em></code></p>', '**[b](/x)** `*c*`'],
   ['<li>a<strong>(b)</strong><b>c</b></li>', '- a**(b)****c**'],
