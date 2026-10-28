@@ -1,0 +1,157 @@
+name: Benchmark audit
+
+on:
+  push:
+    branches:
+      - perf/benchmark-audit
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request to audit
+        type: choice
+        required: true
+        default: '394'
+        options:
+          - '385'
+          - '390'
+          - '393'
+          - '394'
+          - '396'
+          - '398'
+          - '411'
+          - '414'
+          - '417'
+          - '418'
+          - '421'
+
+permissions: {}
+
+jobs:
+  audit:
+    if: github.repository == 'everton-dgn/mdream'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      AUDIT_PR: ${{ inputs.pull_request || '394' }}
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Prepare evidence directory
+        run: |
+          audit_root="$RUNNER_TEMP/mdream-benchmark-audit"
+          mkdir -p "$audit_root/results"
+          printf 'AUDIT_ROOT=%s\n' "$audit_root" >> "$GITHUB_ENV"
+
+      - name: Use Node.js 24.21.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack and wasm-opt
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: wasm-pack,wasm-opt
+
+      - name: Fetch public sources and pin the harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$AUDIT_PR" in
+            385|390|393|394|396|398|411|414|417|418|421) ;;
+            *) echo 'Invalid pull request selection' >&2; exit 1 ;;
+          esac
+          repo="$AUDIT_ROOT/repo"
+          git init "$repo"
+          git -C "$repo" remote add origin https://github.com/harlan-zw/mdream.git
+          git -C "$repo" fetch --no-tags origin \
+            "refs/pull/$AUDIT_PR/merge:refs/audit/pr-merge" \
+            "refs/pull/$AUDIT_PR/head:refs/audit/pr-head"
+          git -C "$repo" fetch --no-tags https://github.com/everton-dgn/mdream.git \
+            cc4a443fcd23b16b675dd87ff317ab55597fdf63
+          merge=$(git -C "$repo" rev-parse refs/audit/pr-merge^{commit})
+          head=$(git -C "$repo" rev-parse refs/audit/pr-head^{commit})
+          read -r checked_merge base second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$merge")"
+          test "$checked_merge" = "$merge"
+          test -n "$base" && test -n "$second" && test -z "${extra:-}"
+          test "$second" = "$head"
+          harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
+          test "$(git -C "$repo" rev-parse "$harness^{commit}")" = "$harness"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/merge" "$merge"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/harness" "$harness"
+          {
+            printf 'pull_request=%s\nmerge=%s\nbase=%s\nsecond_parent=%s\nharness=%s\n' "$AUDIT_PR" "$merge" "$base" "$second" "$harness"
+            for revision in "$base" "$merge" "$second" "$harness"; do
+              printf 'commit_and_tree='
+              git -C "$repo" show -s --format='%H %T %P' "$revision"
+            done
+            printf 'cpu_allowed='
+            awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status
+            uname -a
+            node --version
+            rustc -Vv
+            cargo --version
+            wasm-pack --version
+            wasm-opt --version
+          } | tee "$AUDIT_ROOT/results/identity.txt"
+
+      - name: Build both revisions with the frozen harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in base merge; do
+            source="$AUDIT_ROOT/$side"
+            dist="$AUDIT_ROOT/$side-dist"
+            mkdir -p "$dist/rust-perf"
+            node "$AUDIT_ROOT/harness/bench/rust-perf/build.ts" "$source" "$dist/rust-perf" \
+              2>&1 | tee "$AUDIT_ROOT/results/$side-native-build.log"
+            node "$source/scripts/build-wasm-edge.mjs" --target web --out-dir "$dist/rust" \
+              2>&1 | tee "$AUDIT_ROOT/results/$side-wasm-build.log"
+            cp "$dist/rust-perf/build.json" "$AUDIT_ROOT/results/$side-build.json"
+          done
+          sha256sum \
+            "$AUDIT_ROOT/base-dist/rust-perf/cpu" "$AUDIT_ROOT/base-dist/rust-perf/alloc" \
+            "$AUDIT_ROOT/merge-dist/rust-perf/cpu" "$AUDIT_ROOT/merge-dist/rust-perf/alloc" \
+            "$AUDIT_ROOT/base-dist/rust/mdream_edge.js" "$AUDIT_ROOT/base-dist/rust/mdream_edge_bg.wasm" \
+            "$AUDIT_ROOT/merge-dist/rust/mdream_edge.js" "$AUDIT_ROOT/merge-dist/rust/mdream_edge_bg.wasm" \
+            "$AUDIT_ROOT/harness/bench/rust-perf/run.ts" "$AUDIT_ROOT/harness/bench/rust-perf/fixtures.ts" \
+            | tee "$AUDIT_ROOT/results/sha256.txt"
+
+      - name: Run paired A A, A B, and B A controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AUDIT_ROOT/merge"
+          for filter in list-items-1x ascii-; do
+            for order in aa ab ba; do
+              case "$order" in
+                aa) left="$AUDIT_ROOT/base-dist"; right="$AUDIT_ROOT/base-dist" ;;
+                ab) left="$AUDIT_ROOT/base-dist"; right="$AUDIT_ROOT/merge-dist" ;;
+                ba) left="$AUDIT_ROOT/merge-dist"; right="$AUDIT_ROOT/base-dist" ;;
+              esac
+              out="$AUDIT_ROOT/results/$filter-$order"
+              RUST_PERF_FILTER="$filter" RUST_PERF_SAMPLES=12 \
+                timeout 240 node --expose-gc "$AUDIT_ROOT/harness/bench/rust-perf/run.ts" "$left" "$right" "$out" \
+                2>&1 | tee "$AUDIT_ROOT/results/$filter-$order.log"
+            done
+          done
+          jq -s -e 'map(.cpu) | unique | length == 1' "$AUDIT_ROOT"/results/*/base-rust-perf.json > /dev/null
+          for filter in list-items-1x ascii-; do
+            jq -s -e '.[0].verification == .[1].verification' \
+              "$AUDIT_ROOT/results/$filter-aa/base-rust-perf.json" \
+              "$AUDIT_ROOT/results/$filter-aa/pr-rust-perf.json" > /dev/null
+          done
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-audit
+          path: ${{ runner.temp }}/mdream-benchmark-audit/results
+          if-no-files-found: error
+          retention-days: 7
