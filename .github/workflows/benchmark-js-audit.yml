@@ -1,0 +1,251 @@
+name: JavaScript benchmark audit
+
+on:
+  push:
+    branches:
+      - perf/benchmark-js-audit
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request to audit
+        type: choice
+        required: true
+        default: '411'
+        options:
+          - '390'
+          - '398'
+          - '411'
+
+permissions: {}
+
+concurrency:
+  group: mdream-benchmark-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: github.repository == 'everton-dgn/mdream'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      AUDIT_PR: ${{ inputs.pull_request || '411' }}
+      GIT_TERMINAL_PROMPT: '0'
+      GIT_CONFIG_NOSYSTEM: '1'
+      GIT_CONFIG_GLOBAL: /dev/null
+    steps:
+      - name: Prepare evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_root="$RUNNER_TEMP/mdream-js-benchmark-audit"
+          mkdir -p "$audit_root/results"
+          printf 'AUDIT_ROOT=%s\n' "$audit_root" >> "$GITHUB_ENV"
+          printf 'AUDIT_START_EPOCH=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Use Node.js 24.21.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12.3.4
+          run_install: 'false'
+
+      - name: Fetch public sources and freeze the harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$AUDIT_PR" in
+            390|398|411) ;;
+            *) echo 'Invalid pull request selection' >&2; exit 1 ;;
+          esac
+          repo="$AUDIT_ROOT/repo"
+          git init "$repo"
+          git -C "$repo" remote add origin https://github.com/harlan-zw/mdream.git
+          git -C "$repo" -c credential.helper= fetch --no-tags origin \
+            "refs/pull/$AUDIT_PR/merge:refs/audit/pr-merge" \
+            "refs/pull/$AUDIT_PR/head:refs/audit/pr-head"
+          git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git \
+            cc4a443fcd23b16b675dd87ff317ab55597fdf63
+          merge=$(git -C "$repo" rev-parse 'refs/audit/pr-merge^{commit}')
+          head=$(git -C "$repo" rev-parse 'refs/audit/pr-head^{commit}')
+          read -r checked_merge base second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$merge")"
+          test "$checked_merge" = "$merge"
+          test -n "$base" && test -n "$second" && test -z "${extra:-}"
+          test "$second" = "$head"
+          harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
+          test "$(git -C "$repo" rev-parse "$harness^{commit}")" = "$harness"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/merge" "$merge"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/harness" "$harness"
+          {
+            printf 'pull_request=%s\nmerge=%s\nbase=%s\nsecond_parent=%s\nharness=%s\n' "$AUDIT_PR" "$merge" "$base" "$second" "$harness"
+            for revision in "$base" "$merge" "$second" "$harness"; do
+              git -C "$repo" show -s --format='commit_tree_parents=%H %T %P' "$revision"
+            done
+            printf 'cpu_allowed='
+            awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status
+            uname -a
+            lscpu
+            node --version
+            node -p 'JSON.stringify(process.versions)'
+            pnpm --version
+            npm --version
+            git --version
+          } | tee "$AUDIT_ROOT/results/identity.txt"
+          sha256sum "$AUDIT_ROOT/harness/bench/perf-ci.mjs" \
+            "$AUDIT_ROOT/harness/bench/perf-fixtures.ts" \
+            "$AUDIT_ROOT/harness/bench/bundle/wiki.html" > "$AUDIT_ROOT/results/harness-sha256.txt"
+
+      - name: Build JS bundles for both revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in base merge; do
+            cd "$AUDIT_ROOT/$side"
+            # JavaScript template literals below intentionally do not expand in Bash.
+            # shellcheck disable=SC2016
+            node -e 'const p = require("./package.json"); if (p.packageManager !== "pnpm@12.3.4") throw new Error(`Unexpected packageManager: ${p.packageManager}`); if (!p.scripts?.["test:bundle-size"]) throw new Error("Missing test:bundle-size")'
+            timeout 480 pnpm install --frozen-lockfile 2>&1 | tee "$AUDIT_ROOT/results/$side-install.log"
+            timeout 60 pnpm list --depth 3 --json > "$AUDIT_ROOT/results/$side-dependency-versions.json"
+            timeout 60 pnpm --filter @mdream/js list --depth 3 --json > "$AUDIT_ROOT/results/$side-js-dependency-versions.json"
+            sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml > "$AUDIT_ROOT/results/$side-build-inputs-sha256.txt"
+            timeout 300 pnpm test:bundle-size 2>&1 | tee "$AUDIT_ROOT/results/$side-build.log"
+            for bundle in core/fixtures/core.mjs minimal/fixtures/minimal.mjs stream/fixtures/stream.mjs; do
+              test -f "bench/bundle/dist/$bundle"
+              sha256sum "bench/bundle/dist/$bundle"
+            done > "$AUDIT_ROOT/results/$side-bundles-sha256.txt"
+            if test -e bench/bundle/dist/rust; then
+              echo 'Unexpected Rust bundle from JS build; refusing inconsistent process sequence' >&2
+              exit 1
+            fi
+          done
+
+      - name: Verify outputs outside timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This copy only exposes the original fixture constants. Timing always uses perf-ci.mjs.
+          HARNESS="$AUDIT_ROOT/harness/bench/perf-ci.mjs" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = process.env.HARNESS
+          const source = readFileSync(path, 'utf8')
+          const suffix = '\nmain()\n'
+          if (!source.endsWith(suffix) || source.split(suffix).length !== 2)
+            throw new Error('Unexpected harness terminal main() call')
+          for (const declaration of ['const html =', 'const htmlBytes =', 'const attributeHeavyHtml =', 'const codeBlockHtml =', 'const STREAM_CHUNK_SIZE =']) {
+            if (source.split(declaration).length !== 2) throw new Error(`Unexpected fixture declaration: ${declaration}`)
+          }
+          writeFileSync(path.replace(/perf-ci\.mjs$/, 'audit-verification-fixtures.mjs'), source.slice(0, -suffix.length) + '\nexport { html, htmlBytes, attributeHeavyHtml, codeBlockHtml, STREAM_CHUNK_SIZE }\n', { flag: 'wx' })
+          NODE
+          cat > "$AUDIT_ROOT/verify.mjs" <<'NODE'
+          import { createHash } from 'node:crypto'
+          import { pathToFileURL } from 'node:url'
+          import { resolve } from 'node:path'
+          const [harness, dist] = process.argv.slice(2)
+          const { html, htmlBytes, attributeHeavyHtml, codeBlockHtml, STREAM_CHUNK_SIZE } = await import(pathToFileURL(harness))
+          const { convert } = await import(pathToFileURL(resolve(dist, 'core/fixtures/core.mjs')))
+          const { convert: minimal } = await import(pathToFileURL(resolve(dist, 'minimal/fixtures/minimal.mjs')))
+          const { convertStream } = await import(pathToFileURL(resolve(dist, 'stream/fixtures/stream.mjs')))
+          const digest = value => createHash('sha256').update(value).digest('hex')
+          const result = {}
+          for (const [name, input, fn] of [['core-wiki', html, convert], ['core-attributes', attributeHeavyHtml, convert], ['core-code-blocks', codeBlockHtml, convert], ['minimal-wiki', html, minimal]]) {
+            const output = await fn(input)
+            result[name] = { inputSha256: digest(input), outputSha256: digest(output), outputBytes: Buffer.byteLength(output) }
+          }
+          let offset = 0
+          const boundaries = []
+          const input = new ReadableStream({ pull(controller) {
+            if (offset < htmlBytes.length) {
+              const chunk = htmlBytes.subarray(offset, offset + STREAM_CHUNK_SIZE)
+              boundaries.push(chunk.length)
+              controller.enqueue(chunk)
+              offset += STREAM_CHUNK_SIZE
+            }
+            else controller.close()
+          } })
+          let output = ''
+          for await (const chunk of convertStream(input)) output += chunk
+          result['stream-wiki'] = { inputSha256: digest(htmlBytes), chunkLengthsSha256: digest(JSON.stringify(boundaries)), chunkCount: boundaries.length, outputSha256: digest(output), outputBytes: Buffer.byteLength(output) }
+          console.log(JSON.stringify(result, null, 2))
+          NODE
+          sha256sum "$AUDIT_ROOT/harness/bench/audit-verification-fixtures.mjs" "$AUDIT_ROOT/verify.mjs" > "$AUDIT_ROOT/results/verification-code-sha256.txt"
+          for side in base merge; do
+            timeout 120 node --expose-gc --min-semi-space-size=256 --max-semi-space-size=256 \
+              "$AUDIT_ROOT/verify.mjs" "$AUDIT_ROOT/harness/bench/audit-verification-fixtures.mjs" \
+              "$AUDIT_ROOT/$side/bench/bundle/dist" > "$AUDIT_ROOT/results/$side-verification.json" 2> "$AUDIT_ROOT/results/$side-verification.log"
+          done
+          BASE="$AUDIT_ROOT/results/base-verification.json" MERGE="$AUDIT_ROOT/results/merge-verification.json" node --input-type=module <<'NODE' > "$AUDIT_ROOT/results/output-comparison.json"
+          import { readFileSync } from 'node:fs'
+          const base = JSON.parse(readFileSync(process.env.BASE, 'utf8'))
+          const merge = JSON.parse(readFileSync(process.env.MERGE, 'utf8'))
+          const comparison = Object.fromEntries(Object.keys(base).map(key => [key, { inputEqual: base[key].inputSha256 === merge[key]?.inputSha256, outputEqual: base[key].outputSha256 === merge[key]?.outputSha256, ...(key === 'stream-wiki' ? { chunkLengthsEqual: base[key].chunkLengthsSha256 === merge[key]?.chunkLengthsSha256 } : {}) }]))
+          console.log(JSON.stringify(comparison, null, 2))
+          NODE
+
+      - name: Run pilot and bounded paired measurements
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
+          cpu=${allowed%%[-,]*}
+          [[ "$cpu" =~ ^[0-9]+$ ]]
+          printf 'cpu=%s\nprocess_timeout_seconds=300\ntiming_cap_seconds=1200\njob_elapsed_cap_seconds=1680\n' "$cpu" | tee "$AUDIT_ROOT/results/collection-plan.txt"
+          started=$SECONDS
+          run_one() {
+            local label="$1" side="$2" start=$SECONDS status remaining limit
+            remaining=$((AUDIT_START_EPOCH + 1680 - $(date +%s)))
+            if (( remaining <= 0 )); then
+              printf 'LIMITATION: job time reserve exhausted before %s\n' "$label" | tee -a "$AUDIT_ROOT/results/collection-plan.txt"
+              return 1
+            fi
+            limit=300
+            if (( remaining < limit )); then limit=$remaining; fi
+            printf 'start %s side=%s elapsed=%s\n' "$label" "$side" "$((SECONDS - started))" | tee -a "$AUDIT_ROOT/results/progress.log"
+            if MDREAM_PERF_DIST="$AUDIT_ROOT/$side/bench/bundle/dist" timeout --kill-after=10 "$limit" \
+              taskset -c "$cpu" node --expose-gc --min-semi-space-size=256 --max-semi-space-size=256 \
+              "$AUDIT_ROOT/harness/bench/perf-ci.mjs" > "$AUDIT_ROOT/results/$label.json" 2> "$AUDIT_ROOT/results/$label.log"; then
+              status=0
+            else
+              status=$?
+            fi
+            printf 'end %s status=%s seconds=%s\n' "$label" "$status" "$((SECONDS - start))" | tee -a "$AUDIT_ROOT/results/progress.log"
+            test "$status" -eq 0 || return "$status"
+            # shellcheck disable=SC2016
+            node -e 'const b = require(process.argv[1]).benches; for (const id of ["core-wiki", "core-attributes", "core-code-blocks", "minimal-wiki", "stream-wiki"]) for (const suffix of ["-cpu", "-wall", "-alloc-jit"]) if (b.filter(x => x.id === id + suffix).length !== 1) throw new Error(`Missing or duplicate ${id + suffix}`)' "$AUDIT_ROOT/results/$label.json"
+          }
+          run_one pilot-a1 base
+          first=$SECONDS
+          run_one pilot-a2 base
+          pilot_total=$((SECONDS - started))
+          printf 'pilot_total_seconds=%s\npilot_second_seconds=%s\n' "$pilot_total" "$((SECONDS - first))" | tee -a "$AUDIT_ROOT/results/collection-plan.txt"
+          # Reserve 50% above the slower pilot process for each process, plus 60 s.
+          # The estimate is a scheduling guard, not a guarantee of completion.
+          first_seconds=$((first - started))
+          second_seconds=$((SECONDS - first))
+          slow=$first_seconds
+          if (( second_seconds > slow )); then slow=$second_seconds; fi
+          estimate=$((3 * slow + 60))
+          printf 'pair_estimate_seconds=%s\n' "$estimate" | tee -a "$AUDIT_ROOT/results/collection-plan.txt"
+          for pair in ab1 ba ab2; do
+            if (( SECONDS - started + estimate > 1200 || $(date +%s) + estimate > AUDIT_START_EPOCH + 1680 )); then
+              printf 'LIMITATION: skipped %s and remaining pairs: pilot-based estimate exceeds timing budget; process variance evidence is incomplete.\n' "$pair" | tee -a "$AUDIT_ROOT/results/collection-plan.txt"
+              break
+            fi
+            case "$pair" in
+              ab1|ab2) run_one "$pair-a" base; run_one "$pair-b" merge ;;
+              ba) run_one "$pair-b" merge; run_one "$pair-a" base ;;
+            esac
+          done
+          printf '%s\n' 'Within-process RME does not measure process-to-process variance.' >> "$AUDIT_ROOT/results/collection-plan.txt"
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-js-audit
+          path: ${{ runner.temp }}/mdream-js-benchmark-audit/results
+          if-no-files-found: error
+          retention-days: 7
