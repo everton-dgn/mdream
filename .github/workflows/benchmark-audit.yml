@@ -10,7 +10,7 @@ on:
         description: Pull request to audit
         type: choice
         required: true
-        default: '394'
+        default: '419'
         options:
           - '385'
           - '393'
@@ -20,6 +20,7 @@ on:
           - '414'
           - '417'
           - '418'
+          - '419'
           - '421'
 
 permissions: {}
@@ -34,7 +35,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
-      AUDIT_PR: ${{ inputs.pull_request || '394' }}
+      AUDIT_PR: ${{ inputs.pull_request || '419' }}
       GIT_TERMINAL_PROMPT: '0'
     steps:
       - name: Prepare evidence directory
@@ -64,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$AUDIT_PR" in
-            385|393|394|396|398|414|417|418|421) ;;
+            385|393|394|396|398|414|417|418|419|421) ;;
             *) echo 'Invalid pull request selection' >&2; exit 1 ;;
           esac
           repo="$AUDIT_ROOT/repo"
@@ -81,6 +82,10 @@ jobs:
           test "$checked_merge" = "$merge"
           test -n "$base" && test -n "$second" && test -z "${extra:-}"
           test "$second" = "$head"
+          if [ "$AUDIT_PR" = 419 ]; then
+            git -C "$repo" diff --exit-code "$base" "$merge" -- \
+              crates scripts/build-wasm-edge.mjs rust-toolchain.toml .cargo
+          fi
           harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
           test "$(git -C "$repo" rev-parse "$harness^{commit}")" = "$harness"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
@@ -132,7 +137,7 @@ jobs:
           case "$AUDIT_PR" in
             385|421) filters='list-items- list-attribute- breaks-' ;;
             393|398|414) filters='list-items- list-attribute-' ;;
-            394) filters='list-items- list-attribute- ascii-' ;;
+            394|419) filters='list-items- list-attribute- ascii-' ;;
             396) filters='code-spans code-backticks breaks- list-items- list-attribute-' ;;
             417) filters='breaks-' ;;
             418) filters='ascii-' ;;
