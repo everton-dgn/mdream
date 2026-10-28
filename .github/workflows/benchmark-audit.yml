@@ -13,18 +13,20 @@ on:
         default: '394'
         options:
           - '385'
-          - '390'
           - '393'
           - '394'
           - '396'
           - '398'
-          - '411'
           - '414'
           - '417'
           - '418'
           - '421'
 
 permissions: {}
+
+concurrency:
+  group: mdream-benchmark-audit
+  cancel-in-progress: false
 
 jobs:
   audit:
@@ -62,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$AUDIT_PR" in
-            385|390|393|394|396|398|411|414|417|418|421) ;;
+            385|393|394|396|398|414|417|418|421) ;;
             *) echo 'Invalid pull request selection' >&2; exit 1 ;;
           esac
           repo="$AUDIT_ROOT/repo"
@@ -127,7 +129,26 @@ jobs:
         run: |
           set -euo pipefail
           cd "$AUDIT_ROOT/merge"
-          for filter in list-items-1x ascii-; do
+          case "$AUDIT_PR" in
+            385|421) filters='list-items- list-attribute- breaks-' ;;
+            393|398|414) filters='list-items- list-attribute-' ;;
+            394) filters='list-items- list-attribute- ascii-' ;;
+            396) filters='code-spans code-backticks breaks- list-items- list-attribute-' ;;
+            417) filters='breaks-' ;;
+            418) filters='ascii-' ;;
+            *) echo 'Invalid pull request selection' >&2; exit 1 ;;
+          esac
+          cases=''
+          for filter in $filters; do
+            case "$filter" in
+              list-items-|list-attribute-|breaks-)
+                for scale in 1x 2x 4x; do cases="$cases $filter$scale"; done ;;
+              ascii-)
+                cases="$cases ascii-markdown ascii-text ascii-html" ;;
+              *) cases="$cases $filter" ;;
+            esac
+          done
+          for filter in $cases; do
             for order in aa ab ba; do
               case "$order" in
                 aa) left="$AUDIT_ROOT/base-dist"; right="$AUDIT_ROOT/base-dist" ;;
@@ -138,14 +159,20 @@ jobs:
               RUST_PERF_FILTER="$filter" RUST_PERF_SAMPLES=12 \
                 timeout 240 node --expose-gc "$AUDIT_ROOT/harness/bench/rust-perf/run.ts" "$left" "$right" "$out" \
                 2>&1 | tee "$AUDIT_ROOT/results/$filter-$order.log"
+              if [ "$order" = aa ]; then
+                jq -s -e '.[0].verification == .[1].verification' \
+                  "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
+                # Stop this case if A/A uncertainty or bias exceeds the 5% CI noise floor.
+                if ! jq -e '[.benches[] | select(.id | endswith("-cpu"))] | length > 0 and all(.[]; .comparisonRme != null and .comparisonRme <= 5 and ((.comparisonRatio - 1) | fabs) <= 0.05)' \
+                  "$out/pr-rust-perf.json" > /dev/null; then
+                  printf 'A/A unstable; A/B and B/A skipped for %s\n' "$filter" \
+                    | tee "$AUDIT_ROOT/results/$filter-unstable.txt"
+                  break
+                fi
+              fi
             done
           done
           jq -s -e 'map(.cpu) | unique | length == 1' "$AUDIT_ROOT"/results/*/base-rust-perf.json > /dev/null
-          for filter in list-items-1x ascii-; do
-            jq -s -e '.[0].verification == .[1].verification' \
-              "$AUDIT_ROOT/results/$filter-aa/base-rust-perf.json" \
-              "$AUDIT_ROOT/results/$filter-aa/pr-rust-perf.json" > /dev/null
-          done
 
       - name: Upload audit evidence
         if: always()
