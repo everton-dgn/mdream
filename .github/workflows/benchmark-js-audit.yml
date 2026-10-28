@@ -15,6 +15,14 @@ on:
           - '390'
           - '398'
           - '411'
+      comparison:
+        description: Comparison to run
+        type: choice
+        required: true
+        default: upstream
+        options:
+          - upstream
+          - state-shape-411
 
 permissions: {}
 
@@ -29,6 +37,7 @@ jobs:
     timeout-minutes: 30
     env:
       AUDIT_PR: ${{ inputs.pull_request || '411' }}
+      AUDIT_COMPARISON: ${{ github.event_name == 'push' && 'state-shape-411' || (inputs.comparison || 'upstream') }}
       GIT_TERMINAL_PROMPT: '0'
       GIT_CONFIG_NOSYSTEM: '1'
       GIT_CONFIG_GLOBAL: /dev/null
@@ -64,25 +73,71 @@ jobs:
           repo="$AUDIT_ROOT/repo"
           git init "$repo"
           git -C "$repo" remote add origin https://github.com/harlan-zw/mdream.git
-          git -C "$repo" -c credential.helper= fetch --no-tags origin \
-            "refs/pull/$AUDIT_PR/merge:refs/audit/pr-merge" \
-            "refs/pull/$AUDIT_PR/head:refs/audit/pr-head"
           git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git \
             cc4a443fcd23b16b675dd87ff317ab55597fdf63
-          merge=$(git -C "$repo" rev-parse 'refs/audit/pr-merge^{commit}')
-          head=$(git -C "$repo" rev-parse 'refs/audit/pr-head^{commit}')
-          read -r checked_merge base second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$merge")"
-          test "$checked_merge" = "$merge"
-          test -n "$base" && test -n "$second" && test -z "${extra:-}"
-          test "$second" = "$head"
           harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
           test "$(git -C "$repo" rev-parse "$harness^{commit}")" = "$harness"
-          git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
-          git -C "$repo" worktree add --detach "$AUDIT_ROOT/merge" "$merge"
+          case "$AUDIT_COMPARISON" in
+            upstream)
+              git -C "$repo" -c credential.helper= fetch --no-tags origin \
+                "refs/pull/$AUDIT_PR/merge:refs/audit/pr-merge" \
+                "refs/pull/$AUDIT_PR/head:refs/audit/pr-head"
+              merge=$(git -C "$repo" rev-parse 'refs/audit/pr-merge^{commit}')
+              head=$(git -C "$repo" rev-parse 'refs/audit/pr-head^{commit}')
+              read -r checked_merge base second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$merge")"
+              test "$checked_merge" = "$merge"
+              test -n "$base" && test -n "$second" && test -z "${extra:-}"
+              test "$second" = "$head"
+              side_a=base
+              side_b=merge
+              left=$base
+              right=$merge
+              identity_revisions=("$base" "$merge" "$second" "$harness")
+              printf 'pull_request=%s\ncomparison=upstream\nmerge=%s\nbase=%s\nsecond_parent=%s\nharness=%s\n' "$AUDIT_PR" "$merge" "$base" "$second" "$harness" > "$AUDIT_ROOT/results/source-identity.txt"
+              ;;
+            state-shape-411)
+              test "$AUDIT_PR" = 411 || { echo 'state-shape-411 requires PR 411' >&2; exit 1; }
+              control=bc6c76f628360b22ad0b9748dd255edf482412b9
+              candidate=87fda8c26a2ae88d96cd2a7b13d7f14505ee1bce
+              [[ "$candidate" =~ ^[0-9a-f]{40}$ ]] || { echo 'Reviewed candidate SHA is not configured' >&2; exit 1; }
+              git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git "$candidate"
+              test "$(git -C "$repo" rev-parse "$candidate^{commit}")" = "$candidate"
+              test "$(git -C "$repo" rev-parse "$control^{commit}")" = "$control"
+              read -r checked_control control_first control_second control_extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$control")"
+              test "$checked_control" = "$control"
+              test "$control_first" = b1c86e1b3424fc1bdb605fc30cdf7d70491269fc
+              test "$control_second" = 9a10f82b1e5b17e245d79f0b84f0b4f46405e4bd
+              test -z "${control_extra:-}"
+              read -r checked_candidate parent candidate_extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$candidate")"
+              test "$checked_candidate" = "$candidate" && test "$parent" = "$control" && test -z "${candidate_extra:-}"
+              path=packages/js/src/parse.ts
+              test "$(git -C "$repo" diff --no-renames --name-only "$control" "$candidate")" = "$path"
+              git -C "$repo" diff --no-ext-diff --no-textconv --no-renames --binary "$control" "$candidate" -- "$path" > "$AUDIT_ROOT/results/candidate.diff"
+              {
+                for revision in "$control" "$candidate"; do
+                  printf 'revision=%s blob=' "$revision"
+                  git -C "$repo" rev-parse "$revision:$path"
+                  printf 'sha256='
+                  git -C "$repo" cat-file blob "$revision:$path" | sha256sum
+                  git -C "$repo" ls-tree "$revision" -- "$path"
+                done
+              } > "$AUDIT_ROOT/results/source-blob-hashes.txt"
+              side_a=control
+              side_b=candidate
+              left=$control
+              right=$candidate
+              identity_revisions=("$control" "$candidate" "$harness")
+              printf 'pull_request=%s\ncomparison=state-shape-411\ncontrol=%s\ncandidate=%s\nharness=%s\n' "$AUDIT_PR" "$control" "$candidate" "$harness" > "$AUDIT_ROOT/results/source-identity.txt"
+              ;;
+            *) echo 'Invalid comparison selection' >&2; exit 1 ;;
+          esac
+          printf 'SIDE_A=%s\nSIDE_B=%s\n' "$side_a" "$side_b" >> "$GITHUB_ENV"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/$side_a" "$left"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/$side_b" "$right"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/harness" "$harness"
           {
-            printf 'pull_request=%s\nmerge=%s\nbase=%s\nsecond_parent=%s\nharness=%s\n' "$AUDIT_PR" "$merge" "$base" "$second" "$harness"
-            for revision in "$base" "$merge" "$second" "$harness"; do
+            cat "$AUDIT_ROOT/results/source-identity.txt"
+            for revision in "${identity_revisions[@]}"; do
               git -C "$repo" show -s --format='commit_tree_parents=%H %T %P' "$revision"
             done
             printf 'cpu_allowed='
@@ -103,7 +158,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for side in base merge; do
+          for side in "$SIDE_A" "$SIDE_B"; do
             cd "$AUDIT_ROOT/$side"
             # JavaScript template literals below intentionally do not expand in Bash.
             # shellcheck disable=SC2016
@@ -172,12 +227,12 @@ jobs:
           console.log(JSON.stringify(result, null, 2))
           NODE
           sha256sum "$AUDIT_ROOT/harness/bench/audit-verification-fixtures.mjs" "$AUDIT_ROOT/verify.mjs" > "$AUDIT_ROOT/results/verification-code-sha256.txt"
-          for side in base merge; do
+          for side in "$SIDE_A" "$SIDE_B"; do
             timeout 120 node --expose-gc --min-semi-space-size=256 --max-semi-space-size=256 \
               "$AUDIT_ROOT/verify.mjs" "$AUDIT_ROOT/harness/bench/audit-verification-fixtures.mjs" \
               "$AUDIT_ROOT/$side/bench/bundle/dist" > "$AUDIT_ROOT/results/$side-verification.json" 2> "$AUDIT_ROOT/results/$side-verification.log"
           done
-          BASE="$AUDIT_ROOT/results/base-verification.json" MERGE="$AUDIT_ROOT/results/merge-verification.json" node --input-type=module <<'NODE' > "$AUDIT_ROOT/results/output-comparison.json"
+          BASE="$AUDIT_ROOT/results/$SIDE_A-verification.json" MERGE="$AUDIT_ROOT/results/$SIDE_B-verification.json" node --input-type=module <<'NODE' > "$AUDIT_ROOT/results/output-comparison.json"
           import { readFileSync } from 'node:fs'
           const base = JSON.parse(readFileSync(process.env.BASE, 'utf8'))
           const merge = JSON.parse(readFileSync(process.env.MERGE, 'utf8'))
@@ -216,9 +271,9 @@ jobs:
             # shellcheck disable=SC2016
             node -e 'const b = require(process.argv[1]).benches; for (const id of ["core-wiki", "core-attributes", "core-code-blocks", "minimal-wiki", "stream-wiki"]) for (const suffix of ["-cpu", "-wall", "-alloc-jit"]) if (b.filter(x => x.id === id + suffix).length !== 1) throw new Error(`Missing or duplicate ${id + suffix}`)' "$AUDIT_ROOT/results/$label.json"
           }
-          run_one pilot-a1 base
+          run_one pilot-a1 "$SIDE_A"
           first=$SECONDS
-          run_one pilot-a2 base
+          run_one pilot-a2 "$SIDE_A"
           pilot_total=$((SECONDS - started))
           printf 'pilot_total_seconds=%s\npilot_second_seconds=%s\n' "$pilot_total" "$((SECONDS - first))" | tee -a "$AUDIT_ROOT/results/collection-plan.txt"
           # Reserve 50% above the slower pilot process for each process, plus 60 s.
@@ -235,8 +290,8 @@ jobs:
               break
             fi
             case "$pair" in
-              ab1|ab2) run_one "$pair-a" base; run_one "$pair-b" merge ;;
-              ba) run_one "$pair-b" merge; run_one "$pair-a" base ;;
+              ab1|ab2) run_one "$pair-a" "$SIDE_A"; run_one "$pair-b" "$SIDE_B" ;;
+              ba) run_one "$pair-b" "$SIDE_B"; run_one "$pair-a" "$SIDE_A" ;;
             esac
           done
           printf '%s\n' 'Within-process RME does not measure process-to-process variance.' >> "$AUDIT_ROOT/results/collection-plan.txt"
