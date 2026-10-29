@@ -116,14 +116,14 @@ jobs:
           test "$second" = 5efa720f652b6b899b52b172f0817babbc51dc15 && test -z "${extra:-}"
           test "$(git -C "$repo" rev-parse 'refs/audit/pr-head^{commit}')" = "$second"
           git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git \
-            refs/heads/perf/punctuation-closer-cold-path:refs/audit/candidate
+            refs/heads/perf/emphasis-runtime-cost:refs/audit/candidate
           candidate=$(git -C "$repo" rev-parse 'refs/audit/candidate^{commit}')
-          test "$candidate" = 5cc25da0c061a3699b22b1aa0c6feb99833ee1cc
+          test "$candidate" = 594fb8d1b37ab90284f79e3e74fb1f467e8cc2a0
           read -r checked_candidate parent extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$candidate")"
           test "$checked_candidate" = "$candidate" && test "$parent" = "$control" && test -z "${extra:-}"
           path=crates/core/src/convert/output.rs
           test "$(git -C "$repo" diff --no-renames --name-only "$control" "$candidate")" = "$path"
-          test "$(git -C "$repo" rev-parse "$candidate:$path")" = 499d12a7e5e05f7e4610ce308657151befb5d605
+          test "$(git -C "$repo" rev-parse "$candidate:$path")" = 16581b39d2db56f8c03acd49c8dd9bf753592676
           test "$(git -C "$repo" ls-tree "$control" -- "$path" | cut -d ' ' -f 1)" = 100644
           test "$(git -C "$repo" ls-tree "$candidate" -- "$path" | cut -d ' ' -f 1)" = 100644
           git -C "$repo" diff --no-ext-diff --no-textconv --no-renames --binary "$control" "$candidate" -- "$path" > "$AUDIT_ROOT/results/candidate.diff"
