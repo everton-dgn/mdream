@@ -65,14 +65,16 @@ jobs:
           git init "$repo"
           git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/harlan-zw/mdream.git "$base" "$control"
           git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git "$MAIN_CANDIDATE" "$PR_CANDIDATE" "$harness"
-          test "$(git -C "$repo" show -s --format=%P "$MAIN_CANDIDATE")" = "$base"
-          test "$(git -C "$repo" show -s --format=%P "$PR_CANDIDATE")" = "$control"
+          test "$(git -C "$repo" show -s --format=%P "$MAIN_CANDIDATE")" = 82c1926b0c1a93c8e432341606ade3ef38684e77
+          test "$(git -C "$repo" show -s --format=%P "$PR_CANDIDATE")" = b33876a7dcef8801645e92ecc5939d2941da3269
+          test "$(git -C "$repo" show -s --format=%P 82c1926b0c1a93c8e432341606ade3ef38684e77)" = "$base"
+          test "$(git -C "$repo" show -s --format=%P b33876a7dcef8801645e92ecc5939d2941da3269)" = "$control"
           test "$(git -C "$repo" show -s --format=%P "$control")" = "$base 5efa720f652b6b899b52b172f0817babbc51dc15"
           paths=$(printf '%s\n' crates/core/src/convert/mod.rs crates/core/tests/streaming_html_parity.rs)
           test "$(git -C "$repo" diff --no-renames --name-only "$base" "$MAIN_CANDIDATE")" = "$paths"
           test "$(git -C "$repo" diff --no-renames --name-only "$control" "$PR_CANDIDATE")" = "$paths"
-          test "$(git -C "$repo" rev-parse "$MAIN_CANDIDATE:crates/core/src/convert/mod.rs")" = 2095fcdf892e8ad6c25dcedafd9f6b70f8609494
-          test "$(git -C "$repo" rev-parse "$PR_CANDIDATE:crates/core/src/convert/mod.rs")" = 974857bb5ee5d3dcd820aec69dd67fd17f9e7791
+          test "$(git -C "$repo" rev-parse "$MAIN_CANDIDATE:crates/core/src/convert/mod.rs")" = 8f460f65cebe189dfd9619505c11f7c04405ec45
+          test "$(git -C "$repo" rev-parse "$PR_CANDIDATE:crates/core/src/convert/mod.rs")" = c2a604b751730cb19e95fe883984dcf27751ddab
           for revision in "$MAIN_CANDIDATE" "$PR_CANDIDATE"; do
             test "$(git -C "$repo" rev-parse "$revision:crates/core/tests/streaming_html_parity.rs")" = 03e4b72ece3426bcbf7132ebf2f2f024717ea185
           done
@@ -162,10 +164,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$AUDIT_ROOT/pr-scalar"
-          for comparison in null-build main-effect pr-effect remaining-pr-cost; do
+          for comparison in null-build original-pr-cost main-effect pr-effect remaining-pr-cost; do
             mkdir -p "$AUDIT_ROOT/results/$comparison"
             case "$comparison" in
               null-build) first=base; second=base-rebuild ;;
+              original-pr-cost) first=base; second=pr-control ;;
               main-effect) first=base; second=main-scalar ;;
               pr-effect) first=pr-control; second=pr-scalar ;;
               remaining-pr-cost) first=main-scalar; second=pr-scalar ;;
@@ -188,7 +191,7 @@ jobs:
                 else
                   printf '%s\n' "$cpu" > "$AUDIT_ROOT/results/cpu.json"
                 fi
-                if [ "$comparison" != remaining-pr-cost ] || [ "$order" = aa ]; then
+                if [ "$comparison" = null-build ] || [ "$comparison" = main-effect ] || [ "$comparison" = pr-effect ] || [ "$order" = aa ]; then
                   jq -s -e '.[0].verification == .[1].verification' "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
                 fi
                 if [ "$order" = aa ]; then
