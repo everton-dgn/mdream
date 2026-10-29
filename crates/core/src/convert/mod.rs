@@ -1629,21 +1629,8 @@ impl ConvertState {
         {
           let start = i;
           let limit = chunk_length.min(i + self.text_run_room(&text_buffer));
-          i += 1;
-          let mut had_space = false;
-          loop {
-            while i < limit && BATCHABLE_TEXT[bytes[i] as usize] {
-              i += 1;
-            }
-            // Doubled, trailing, and pre-tag spaces leave the run to the
-            // general path, which keeps its collapsing semantics.
-            if i + 1 < limit && bytes[i] == SPACE_CHAR && BATCHABLE_TEXT[bytes[i + 1] as usize] {
-              had_space = true;
-              i += 2;
-              continue;
-            }
-            break;
-          }
+          let (advance, had_space) = ascii_batch_end(&bytes[start..limit]);
+          i += advance;
           let before_len = text_buffer.len();
           self.truncated |= push_capped_text_node(
             &mut text_buffer,
@@ -3190,6 +3177,26 @@ pub(crate) fn clamp_to_char_boundary(text: &str, max: usize) -> &str {
     end -= 1;
   }
   &text[..end]
+}
+
+/// End of a batchable ASCII run, including single inter-word spaces.
+#[inline(never)]
+fn ascii_batch_end(bytes: &[u8]) -> (usize, bool) {
+  let mut end = 1;
+  let mut had_space = false;
+  loop {
+    while end < bytes.len() && BATCHABLE_TEXT[bytes[end] as usize] {
+      end += 1;
+    }
+    // Leave doubled, trailing, and pre-tag spaces to the general path.
+    if end + 1 < bytes.len() && bytes[end] == SPACE_CHAR && BATCHABLE_TEXT[bytes[end + 1] as usize]
+    {
+      had_space = true;
+      end += 2;
+    } else {
+      return (end, had_space);
+    }
+  }
 }
 
 /// End of the non-ASCII run that starts at `start`, stopping at `limit`.
