@@ -3218,7 +3218,7 @@ pub(crate) fn clamp_to_char_boundary(text: &str, max: usize) -> &str {
 }
 
 /// End of a batchable ASCII run, including single inter-word spaces.
-#[inline(never)]
+#[inline(always)]
 fn ascii_batch_end(bytes: &[u8]) -> (usize, bool) {
   let mut end = 1;
   let mut had_space = false;
