@@ -1282,6 +1282,7 @@ impl ConvertState {
         && emitted.is_some_and(|value| value.as_bytes().first() == Some(&mark))
         && self.emphasis_context()
       {
+        std::hint::cold_path();
         self.pending_emphasis = mark;
       }
     }
@@ -2800,6 +2801,7 @@ impl ConvertState {
       self.last_content_cache_len = text.len();
     }
     if self.pending_emphasis != 0 {
+      std::hint::cold_path();
       self.push_emphasis_text(text);
     } else {
       self.buffer.push_str(text);
@@ -5024,14 +5026,16 @@ impl ConvertState {
   ) {
     let output_str = output.unwrap_or("");
     // Only contiguous closing delimiters may extend a pending closer.
-    if self.pending_emphasis != 0
-      && (configured_new_lines != 0
+    if self.pending_emphasis != 0 {
+      std::hint::cold_path();
+      if configured_new_lines != 0
         || (!output_str.is_empty()
           && (is_enter
             || output_str.as_bytes().first() != Some(&self.pending_emphasis)
-            || output_str.as_bytes().last() != Some(&self.pending_emphasis))))
-    {
-      self.pending_emphasis = 0;
+            || output_str.as_bytes().last() != Some(&self.pending_emphasis)))
+      {
+        self.pending_emphasis = 0;
+      }
     }
     let is_line_boundary =
       || !literal && (output_str.starts_with('\n') || output_str.starts_with("\\\n"));
