@@ -1,35 +1,16 @@
 name: Benchmark audit
 
 on:
-  push:
-    branches:
-      - perf/benchmark-audit
   workflow_dispatch:
     inputs:
-      pull_request:
-        description: Pull request to audit
-        type: choice
+      main_candidate:
+        description: Full commit of the scalar scanner on main
+        type: string
         required: true
-        default: '419'
-        options:
-          - '385'
-          - '393'
-          - '394'
-          - '396'
-          - '398'
-          - '414'
-          - '417'
-          - '418'
-          - '419'
-          - '421'
-      comparison:
-        description: Comparison to run
-        type: choice
+      pr_candidate:
+        description: Full commit of the same scanner on the PR 394 control
+        type: string
         required: true
-        default: upstream
-        options:
-          - upstream
-          - cold-emphasis394
 
 permissions: {}
 
@@ -41,17 +22,17 @@ jobs:
   audit:
     if: github.repository == 'everton-dgn/mdream'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
-      AUDIT_PR: ${{ github.event_name == 'push' && '394' || (inputs.pull_request || '419') }}
-      AUDIT_COMPARISON: ${{ github.event_name == 'push' && 'cold-emphasis394' || (inputs.comparison || 'upstream') }}
+      MAIN_CANDIDATE: ${{ inputs.main_candidate }}
+      PR_CANDIDATE: ${{ inputs.pr_candidate }}
       GIT_TERMINAL_PROMPT: '0'
       GIT_CONFIG_NOSYSTEM: '1'
       GIT_CONFIG_GLOBAL: /dev/null
     steps:
       - name: Prepare evidence directory
         run: |
-          audit_root="$RUNNER_TEMP/mdream-benchmark-audit"
+          audit_root="$RUNNER_TEMP/mdream-scalar-scanner"
           mkdir -p "$audit_root/results"
           printf 'AUDIT_ROOT=%s\n' "$audit_root" >> "$GITHUB_ENV"
 
@@ -61,7 +42,7 @@ jobs:
           node-version: 24.21.0
 
       - name: Install Rust 1.99.1
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
           toolchain: 1.99.1
           targets: wasm32-unknown-unknown
@@ -71,230 +52,146 @@ jobs:
         with:
           tool: wasm-pack,wasm-opt
 
-      - name: Fetch public sources and pin the harness
+      - name: Pin all four source trees and the unchanged harness
         shell: bash
         run: |
           set -euo pipefail
-          case "$AUDIT_PR" in
-            385|393|394|396|398|414|417|418|419|421) ;;
-            *) echo 'Invalid pull request selection' >&2; exit 1 ;;
-          esac
+          [[ "$MAIN_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PR_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          base=b1c86e1b3424fc1bdb605fc30cdf7d70491269fc
+          control=9a796cfbda5cefb6c78f8feba00b015625a11d61
+          harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
           repo="$AUDIT_ROOT/repo"
           git init "$repo"
-          git -C "$repo" remote add origin https://github.com/harlan-zw/mdream.git
-          git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git \
-            cc4a443fcd23b16b675dd87ff317ab55597fdf63
-          case "$AUDIT_COMPARISON" in
-          upstream)
-          git -C "$repo" -c credential.helper= fetch --no-tags origin \
-            "refs/pull/$AUDIT_PR/merge:refs/audit/pr-merge" \
-            "refs/pull/$AUDIT_PR/head:refs/audit/pr-head"
-          merge=$(git -C "$repo" rev-parse refs/audit/pr-merge^{commit})
-          head=$(git -C "$repo" rev-parse refs/audit/pr-head^{commit})
-          read -r checked_merge base second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$merge")"
-          test "$checked_merge" = "$merge"
-          test -n "$base" && test -n "$second" && test -z "${extra:-}"
-          test "$second" = "$head"
-          if [ "$AUDIT_PR" = 419 ]; then
-            git -C "$repo" diff --exit-code "$base" "$merge" -- \
-              crates scripts/build-wasm-edge.mjs rust-toolchain.toml .cargo
-          fi
-          side_a=base
-          side_b=merge
-          left=$base
-          right=$merge
-          identity_revisions=("$base" "$merge" "$second")
-          printf 'pull_request=%s\ncomparison=upstream\nmerge=%s\nbase=%s\nsecond_parent=%s\n' "$AUDIT_PR" "$merge" "$base" "$second" > "$AUDIT_ROOT/results/source-identity.txt"
-          ;;
-          cold-emphasis394)
-          test "$AUDIT_PR" = 394 || { echo 'cold-emphasis394 requires PR 394' >&2; exit 1; }
-          git -C "$repo" -c credential.helper= fetch --no-tags origin refs/pull/394/merge:refs/audit/pr-merge refs/pull/394/head:refs/audit/pr-head
-          control=$(git -C "$repo" rev-parse 'refs/audit/pr-merge^{commit}')
-          test "$control" = 9a796cfbda5cefb6c78f8feba00b015625a11d61
-          read -r checked_control first second extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$control")"
-          test "$checked_control" = "$control" && test "$first" = b1c86e1b3424fc1bdb605fc30cdf7d70491269fc
-          test "$second" = 5efa720f652b6b899b52b172f0817babbc51dc15 && test -z "${extra:-}"
-          test "$(git -C "$repo" rev-parse 'refs/audit/pr-head^{commit}')" = "$second"
-          git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git \
-            refs/heads/perf/emphasis-runtime-cost:refs/audit/candidate
-          candidate=$(git -C "$repo" rev-parse 'refs/audit/candidate^{commit}')
-          test "$candidate" = 594fb8d1b37ab90284f79e3e74fb1f467e8cc2a0
-          read -r checked_candidate parent extra <<< "$(git -C "$repo" rev-list --parents -n 1 "$candidate")"
-          test "$checked_candidate" = "$candidate" && test "$parent" = "$control" && test -z "${extra:-}"
-          path=crates/core/src/convert/output.rs
-          test "$(git -C "$repo" diff --no-renames --name-only "$control" "$candidate")" = "$path"
-          test "$(git -C "$repo" rev-parse "$candidate:$path")" = 16581b39d2db56f8c03acd49c8dd9bf753592676
-          test "$(git -C "$repo" ls-tree "$control" -- "$path" | cut -d ' ' -f 1)" = 100644
-          test "$(git -C "$repo" ls-tree "$candidate" -- "$path" | cut -d ' ' -f 1)" = 100644
-          git -C "$repo" diff --no-ext-diff --no-textconv --no-renames --binary "$control" "$candidate" -- "$path" > "$AUDIT_ROOT/results/candidate.diff"
-          sha256sum "$AUDIT_ROOT/results/candidate.diff" > "$AUDIT_ROOT/results/candidate-diff-sha256.txt"
-          for revision in "$control" "$candidate"; do
-            printf 'revision=%s blob=' "$revision"
-            git -C "$repo" rev-parse "$revision:$path"
-            git -C "$repo" cat-file blob "$revision:$path" | sha256sum
-          done > "$AUDIT_ROOT/results/source-blob-hashes.txt"
-          side_a=control
-          side_b=candidate
-          left=$control
-          right=$candidate
-          identity_revisions=("$control" "$candidate")
-          printf 'pull_request=%s\ncomparison=cold-emphasis394\ncontrol=%s\ncandidate=%s\n' "$AUDIT_PR" "$control" "$candidate" > "$AUDIT_ROOT/results/source-identity.txt"
-          ;;
-          *) echo 'Invalid comparison selection' >&2; exit 1 ;;
-          esac
-          harness=cc4a443fcd23b16b675dd87ff317ab55597fdf63
-          test "$(git -C "$repo" rev-parse "$harness^{commit}")" = "$harness"
-          printf 'SIDE_A=%s\nSIDE_B=%s\n' "$side_a" "$side_b" >> "$GITHUB_ENV"
-          git -C "$repo" worktree add --detach "$AUDIT_ROOT/$side_a" "$left"
-          git -C "$repo" worktree add --detach "$AUDIT_ROOT/$side_b" "$right"
+          git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/harlan-zw/mdream.git "$base" "$control"
+          git -C "$repo" -c credential.helper= fetch --no-tags https://github.com/everton-dgn/mdream.git "$MAIN_CANDIDATE" "$PR_CANDIDATE" "$harness"
+          test "$(git -C "$repo" show -s --format=%P "$MAIN_CANDIDATE")" = "$base"
+          test "$(git -C "$repo" show -s --format=%P "$PR_CANDIDATE")" = "$control"
+          test "$(git -C "$repo" show -s --format=%P "$control")" = "$base 5efa720f652b6b899b52b172f0817babbc51dc15"
+          paths=$(printf '%s\n' crates/core/src/convert/mod.rs crates/core/tests/streaming_html_parity.rs)
+          test "$(git -C "$repo" diff --no-renames --name-only "$base" "$MAIN_CANDIDATE")" = "$paths"
+          test "$(git -C "$repo" diff --no-renames --name-only "$control" "$PR_CANDIDATE")" = "$paths"
+          test "$(git -C "$repo" rev-parse "$MAIN_CANDIDATE:crates/core/src/convert/mod.rs")" = 2095fcdf892e8ad6c25dcedafd9f6b70f8609494
+          test "$(git -C "$repo" rev-parse "$PR_CANDIDATE:crates/core/src/convert/mod.rs")" = 974857bb5ee5d3dcd820aec69dd67fd17f9e7791
+          for revision in "$MAIN_CANDIDATE" "$PR_CANDIDATE"; do
+            test "$(git -C "$repo" rev-parse "$revision:crates/core/tests/streaming_html_parity.rs")" = 03e4b72ece3426bcbf7132ebf2f2f024717ea185
+          done
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/main-scalar" "$MAIN_CANDIDATE"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/pr-control" "$control"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/pr-scalar" "$PR_CANDIDATE"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/harness" "$harness"
           {
-            cat "$AUDIT_ROOT/results/source-identity.txt"
-            printf 'harness=%s\n' "$harness"
-            for revision in "${identity_revisions[@]}" "$harness"; do
-              printf 'commit_and_tree='
+            for revision in "$base" "$MAIN_CANDIDATE" "$control" "$PR_CANDIDATE" "$harness"; do
               git -C "$repo" show -s --format='%H %T %P' "$revision"
             done
-            printf 'cpu_allowed='
-            awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status
             uname -a
             node --version
             rustc -Vv
             cargo --version
             wasm-pack --version
             wasm-opt --version
-          } | tee "$AUDIT_ROOT/results/identity.txt"
+            awk '/^Cpus_allowed_list:/ {print}' /proc/self/status
+          } > "$AUDIT_ROOT/results/identity.txt"
+          git -C "$repo" diff --binary "$base" "$MAIN_CANDIDATE" > "$AUDIT_ROOT/results/main-scalar.diff"
+          git -C "$repo" diff --binary "$control" "$PR_CANDIDATE" > "$AUDIT_ROOT/results/pr-scalar.diff"
 
-      - name: Prepare isolated experiment fixtures
+      - name: Add isolated controls without changing the canonical runner
         shell: bash
         run: |
           set -euo pipefail
           original="$AUDIT_ROOT/harness/bench/rust-perf"
-          if [ "$AUDIT_COMPARISON" = upstream ]; then
-            printf 'PERF_DIR=%s\n' "$original" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          test "$AUDIT_COMPARISON" = cold-emphasis394
-          printf '%s\n' 'Experiment performance options: max_node_bytes=0 (uncapped); the 1 MiB cap is validated separately.' \
-            > "$AUDIT_ROOT/results/experiment-options.txt"
-          perf_dir="$AUDIT_ROOT/experiment-rust-perf"
-          cp -R "$original" "$perf_dir"
-          printf '%s\n' '{"type":"module"}' > "$perf_dir/package.json"
-          cat > "$AUDIT_ROOT/fixture-additions.txt" <<'FIXTURES'
-          const emphasisUnit = '<p><strong><a href="/x">b</a> </strong><code><em>c</em></code></p><li>a<strong>(b)</strong><b>c</b></li>'
-          const emphasis = emphasisUnit.repeat(2048)
-          const fragments = '<h2 id="heading">Heading</h2><p><a href="#heading"><strong>valid</strong></a> <a href="#missing"><em>missing</em></a></p>'.repeat(2048)
-          const plainList = `<ul>${'<li>ordinary plain list item</li>'.repeat(4096)}</ul>`
-          for (const input of [emphasis, fragments, plainList]) {
-            if (Buffer.byteLength(input) > 1024 * 1024)
-              throw new Error('Experiment input exceeds 1 MiB')
+          perf="$AUDIT_ROOT/experiment-rust-perf"
+          cp -R "$original" "$perf"
+          printf '%s\n' '{"type":"module"}' > "$perf/package.json"
+          cat > "$AUDIT_ROOT/additions.txt" <<'FIXTURES'
+          for (const width of [1, 2, 3]) {
+            add(`audit-short-word-${width}`, `<p>${('a'.repeat(width) + ' ').repeat(28000)}</p>`)
           }
-          add('audit-emphasis-convert', emphasis)
-          add('audit-fragment-cleanup', fragments, 'fragments')
+          const emphasis = '<p><strong><a href="/x">b</a> </strong><code><em>c</em></code></p><li>a<strong>(b)</strong><b>c</b></li>'.repeat(2048)
+          const plainList = `<ul>${'<li>ordinary plain list item</li>'.repeat(4096)}</ul>`
           for (const [id, html] of [['audit-emphasis-stream-4k', emphasis], ['audit-plain-list-stream-4k', plainList]] as const) {
             cases.push({ id, name: id, operation: 'stream', chunks: utf8Chunks(html, 4096), options: 'default', format: 'markdown', inputBytes: Buffer.byteLength(html) })
           }
           FIXTURES
-          node --input-type=module - "$perf_dir/fixtures.ts" "$AUDIT_ROOT/fixture-additions.txt" <<'NODE'
+          node --input-type=module - "$perf/fixtures.ts" "$AUDIT_ROOT/additions.txt" <<'NODE'
           import { readFileSync, writeFileSync } from 'node:fs'
           const [target, additions] = process.argv.slice(2)
           const source = readFileSync(target, 'utf8')
           const marker = '  return cases\n}'
           if (source.indexOf(marker) < 0 || source.indexOf(marker) !== source.lastIndexOf(marker))
             throw new Error('Unexpected fixture source')
-          writeFileSync(target, source.replace(marker, `${readFileSync(additions, 'utf8')}\n${marker}`))
+          writeFileSync(target, source.replace(marker, readFileSync(additions, 'utf8') + '\n' + marker))
           NODE
-          cmp "$original/run.ts" "$perf_dir/run.ts"
-          sha256sum "$original/run.ts" "$perf_dir/run.ts" "$original/fixtures.ts" "$perf_dir/fixtures.ts" \
-            | tee "$AUDIT_ROOT/results/experiment-harness-sha256.txt"
-          printf 'PERF_DIR=%s\n' "$perf_dir" >> "$GITHUB_ENV"
+          cmp "$original/run.ts" "$perf/run.ts"
+          cmp "$original/build.ts" "$perf/build.ts"
+          sha256sum "$original/run.ts" "$perf/run.ts" "$original/fixtures.ts" "$perf/fixtures.ts" > "$AUDIT_ROOT/results/harness-sha256.txt"
+          printf 'PERF_DIR=%s\n' "$perf" >> "$GITHUB_ENV"
 
-      - name: Build both revisions with the frozen harness
+      - name: Validate the candidate Rust trees before timings
         shell: bash
         run: |
           set -euo pipefail
-          for side in "$SIDE_A" "$SIDE_B"; do
+          for side in main-scalar pr-scalar; do
+            CARGO_TARGET_DIR="$AUDIT_ROOT/$side-test-target" cargo test --manifest-path "$AUDIT_ROOT/$side/crates/Cargo.toml" --workspace --exclude mdream-edge \
+              2>&1 | tee "$AUDIT_ROOT/results/$side-tests.log"
+          done
+
+      - name: Build four isolated native and WASM artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in base main-scalar pr-control pr-scalar; do
             source="$AUDIT_ROOT/$side"
             dist="$AUDIT_ROOT/$side-dist"
-            mkdir -p "$dist/rust-perf"
             node "$PERF_DIR/build.ts" "$source" "$dist/rust-perf" \
               2>&1 | tee "$AUDIT_ROOT/results/$side-native-build.log"
-            node "$source/scripts/build-wasm-edge.mjs" --target web --out-dir "$dist/rust" \
+            CARGO_TARGET_DIR="$dist/wasm-target" node "$source/scripts/build-wasm-edge.mjs" --target web --out-dir "$dist/rust" \
               2>&1 | tee "$AUDIT_ROOT/results/$side-wasm-build.log"
             cp "$dist/rust-perf/build.json" "$AUDIT_ROOT/results/$side-build.json"
+            sha256sum "$dist/rust-perf/cpu" "$dist/rust-perf/alloc" "$dist/rust/mdream_edge.js" "$dist/rust/mdream_edge_bg.wasm" >> "$AUDIT_ROOT/results/artifact-sha256.txt"
           done
-          {
-            for side in "$SIDE_A" "$SIDE_B"; do
-              sha256sum "$AUDIT_ROOT/$side-dist/rust-perf/cpu" "$AUDIT_ROOT/$side-dist/rust-perf/alloc" \
-                "$AUDIT_ROOT/$side-dist/rust/mdream_edge.js" "$AUDIT_ROOT/$side-dist/rust/mdream_edge_bg.wasm"
-            done
-            sha256sum "$AUDIT_ROOT/harness/bench/rust-perf/run.ts" "$AUDIT_ROOT/harness/bench/rust-perf/fixtures.ts" \
-              "$PERF_DIR/run.ts" "$PERF_DIR/fixtures.ts"
-          } | tee "$AUDIT_ROOT/results/sha256.txt"
 
-      - name: Run paired A A, A B, and B A controls
+      - name: Run serial paired comparisons with unchanged options and thresholds
         shell: bash
         run: |
           set -euo pipefail
-          cd "$AUDIT_ROOT/$SIDE_B"
-          if [ "$AUDIT_COMPARISON" = cold-emphasis394 ]; then
-            filters='list-items-1x list-attribute-1x ascii- audit-emphasis-convert audit-fragment-cleanup audit-emphasis-stream-4k audit-plain-list-stream-4k'
-          else
-          case "$AUDIT_PR" in
-            385|421) filters='list-items- list-attribute- breaks-' ;;
-            393|398|414) filters='list-items- list-attribute-' ;;
-            394|419) filters='list-items- list-attribute- ascii-' ;;
-            396) filters='code-spans code-backticks breaks- list-items- list-attribute-' ;;
-            417) filters='breaks-' ;;
-            418) filters='ascii-' ;;
-            *) echo 'Invalid pull request selection' >&2; exit 1 ;;
-          esac
-          fi
-          cases=''
-          for filter in $filters; do
-            case "$filter" in
-              list-items-|list-attribute-|breaks-)
-                for scale in 1x 2x 4x; do cases="$cases $filter$scale"; done ;;
-              ascii-)
-                cases="$cases ascii-markdown ascii-text ascii-html" ;;
-              *) cases="$cases $filter" ;;
+          cd "$AUDIT_ROOT/pr-scalar"
+          for comparison in main-effect pr-effect remaining-pr-cost; do
+            mkdir -p "$AUDIT_ROOT/results/$comparison"
+            case "$comparison" in
+              main-effect) first=base; second=main-scalar ;;
+              pr-effect) first=pr-control; second=pr-scalar ;;
+              remaining-pr-cost) first=main-scalar; second=pr-scalar ;;
             esac
-          done
-          for filter in $cases; do
-            for order in aa ab ba; do
-              case "$order" in
-                aa) left="$AUDIT_ROOT/$SIDE_A-dist"; right="$AUDIT_ROOT/$SIDE_A-dist" ;;
-                ab) left="$AUDIT_ROOT/$SIDE_A-dist"; right="$AUDIT_ROOT/$SIDE_B-dist" ;;
-                ba) left="$AUDIT_ROOT/$SIDE_B-dist"; right="$AUDIT_ROOT/$SIDE_A-dist" ;;
-              esac
-              out="$AUDIT_ROOT/results/$filter-$order"
-              RUST_PERF_FILTER="$filter" RUST_PERF_SAMPLES=12 \
-                timeout 240 node --expose-gc "$PERF_DIR/run.ts" "$left" "$right" "$out" \
-                2>&1 | tee "$AUDIT_ROOT/results/$filter-$order.log"
-              if [ "$AUDIT_COMPARISON" = cold-emphasis394 ]; then
-                jq -s -e '.[0].verification == .[1].verification' \
+            for filter in ascii-markdown ascii-text ascii-html audit-short-word-1 audit-short-word-2 audit-short-word-3 list-items-1x list-items-4x list-attribute-1x list-attribute-4x audit-emphasis-stream-4k audit-plain-list-stream-4k; do
+              for order in aa ab ba; do
+                case "$order" in
+                  aa) left="$first"; right="$first" ;;
+                  ab) left="$first"; right="$second" ;;
+                  ba) left="$second"; right="$first" ;;
+                esac
+                out="$AUDIT_ROOT/results/$comparison/$filter-$order"
+                RUST_PERF_FILTER="$filter" RUST_PERF_SAMPLES=12 timeout 120 node --expose-gc "$PERF_DIR/run.ts" \
+                  "$AUDIT_ROOT/$left-dist" "$AUDIT_ROOT/$right-dist" "$out" 2>&1 | tee "$AUDIT_ROOT/results/$comparison/$filter-$order.log"
+                jq -s -e 'length == 2 and all(.cpu != null) and (map(.cpu) | unique | length == 1)' \
                   "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
-              fi
-              if [ "$order" = aa ]; then
-                jq -s -e '.[0].verification == .[1].verification' \
-                  "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
-                # Stop this case if A/A uncertainty or bias exceeds the 5% CI noise floor.
-                if ! jq -e '[.benches[] | select(.id | endswith("-cpu"))] | length > 0 and all(.[]; .comparisonRme != null and .comparisonRme <= 5 and ((.comparisonRatio - 1) | fabs) <= 0.05)' \
-                  "$out/pr-rust-perf.json" > /dev/null; then
-                  printf 'A/A unstable; A/B and B/A skipped for %s\n' "$filter" \
-                    | tee "$AUDIT_ROOT/results/$filter-unstable.txt"
-                  break
+                if [ "$comparison" != remaining-pr-cost ] || [ "$order" = aa ]; then
+                  jq -s -e '.[0].verification == .[1].verification' "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
                 fi
-              fi
+                if [ "$order" = aa ]; then
+                  jq -e '[.benches[] | select(.kind == "time" and (.informational != true))] |
+                    length == 2 and all(.comparisonRme != null and .comparisonRme <= 5 and .comparisonRatio >= 0.95 and .comparisonRatio <= 1.05)' "$out/pr-rust-perf.json" > /dev/null
+                fi
+              done
             done
           done
-          jq -s -e 'map(.cpu) | unique | length == 1' "$AUDIT_ROOT"/results/*/base-rust-perf.json > /dev/null
 
       - name: Upload audit evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: benchmark-audit
-          path: ${{ runner.temp }}/mdream-benchmark-audit/results
+          name: scalar-scanner-audit
+          path: ${{ env.AUDIT_ROOT }}/results
           if-no-files-found: error
           retention-days: 7
