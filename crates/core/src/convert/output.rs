@@ -1257,6 +1257,19 @@ impl ConvertState {
     }
   }
 
+  #[inline(never)]
+  fn note_punctuation_closer(&mut self, inline_marker_type: u8, emitted: Option<&str>) {
+    let mark = if inline_marker_type == 3 { b'~' } else { b'*' };
+    if self
+      .last_output_byte()
+      .is_some_and(|byte| byte != mark && byte.is_ascii_punctuation())
+      && emitted.is_some_and(|value| value.as_bytes().first() == Some(&mark))
+      && self.emphasis_context()
+    {
+      self.pending_emphasis = mark;
+    }
+  }
+
   /// Drop an empty enter/exit marker pair; returns whether it did.
   #[inline(always)]
   fn drop_empty_marker_pair(
@@ -1275,15 +1288,7 @@ impl ConvertState {
       return false;
     }
     if inline_marker_type <= 4 {
-      let mark = if inline_marker_type == 3 { b'~' } else { b'*' };
-      if self
-        .last_output_byte()
-        .is_some_and(|byte| byte != mark && byte.is_ascii_punctuation())
-        && emitted.is_some_and(|value| value.as_bytes().first() == Some(&mark))
-        && self.emphasis_context()
-      {
-        self.pending_emphasis = mark;
-      }
+      self.note_punctuation_closer(inline_marker_type, emitted);
     }
     let Some(open_marker) = self.open_markers.pop() else {
       return false;
@@ -5013,6 +5018,24 @@ impl ConvertState {
     }
   }
 
+  #[inline(never)]
+  fn invalidate_pending_emphasis_for_output(
+    &mut self,
+    is_enter: bool,
+    configured_new_lines: u8,
+    output_str: &str,
+  ) {
+    // Only contiguous closing delimiters may extend a pending closer.
+    if configured_new_lines != 0
+      || (!output_str.is_empty()
+        && (is_enter
+          || output_str.as_bytes().first() != Some(&self.pending_emphasis)
+          || output_str.as_bytes().last() != Some(&self.pending_emphasis)))
+    {
+      self.pending_emphasis = 0;
+    }
+  }
+
   #[inline]
   pub(crate) fn write_output(
     &mut self,
@@ -5023,15 +5046,8 @@ impl ConvertState {
     literal: bool,
   ) {
     let output_str = output.unwrap_or("");
-    // Only contiguous closing delimiters may extend a pending closer.
-    if self.pending_emphasis != 0
-      && (configured_new_lines != 0
-        || (!output_str.is_empty()
-          && (is_enter
-            || output_str.as_bytes().first() != Some(&self.pending_emphasis)
-            || output_str.as_bytes().last() != Some(&self.pending_emphasis))))
-    {
-      self.pending_emphasis = 0;
+    if self.pending_emphasis != 0 {
+      self.invalidate_pending_emphasis_for_output(is_enter, configured_new_lines, output_str);
     }
     let is_line_boundary =
       || !literal && (output_str.starts_with('\n') || output_str.starts_with("\\\n"));
