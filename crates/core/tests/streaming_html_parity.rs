@@ -49,6 +49,83 @@ fn assert_stream_matches(html: &str) {
 }
 
 #[test]
+fn ascii_batch_boundaries_keep_stream_output_and_caps() {
+  use mdream::html_to_format_result;
+
+  for format in [
+    OutputFormat::Markdown,
+    OutputFormat::Text,
+    OutputFormat::Html,
+  ] {
+    for prefix_len in 0..=4 {
+      for tail in [
+        "a b cc ddd",
+        " x  y ",
+        " &amp; z",
+        " *word*",
+        " é漢",
+        " <em>end</em>",
+      ] {
+        let html = format!("<p>{}{tail}</p>", "a".repeat(prefix_len));
+        for cap in [0, 7, 1024 * 1024] {
+          let options = HtmlToMarkdownOptions {
+            max_node_bytes: cap,
+            ..Default::default()
+          };
+          let expected = html_to_format_result(&html, options.clone(), format);
+          for width in [1, 2, 3, 4, 7] {
+            let mut processor = MarkdownStreamProcessor::new_with_format(options.clone(), format);
+            let mut output = String::new();
+            let mut start = 0;
+            while start < html.len() {
+              let end = html.ceil_char_boundary((start + width).min(html.len()));
+              output.push_str(&processor.process_chunk(&html[start..end]));
+              start = end;
+            }
+            output.push_str(&processor.finish());
+            assert_eq!(
+              output, expected.markdown,
+              "format={format:?} cap={cap} width={width} html={html:?}"
+            );
+            assert_eq!(
+              processor.truncated(),
+              expected.truncated,
+              "format={format:?} cap={cap} width={width} html={html:?}"
+            );
+          }
+        }
+      }
+    }
+    for offset in 0..=4 {
+      let html = format!("<p>{} a bb ccc &amp; é  x </p>", "x".repeat(65536 - offset));
+      for cap in [0, 1024 * 1024] {
+        let options = HtmlToMarkdownOptions {
+          max_node_bytes: cap,
+          ..Default::default()
+        };
+        let expected = html_to_format_result(&html, options.clone(), format);
+        let mut processor = MarkdownStreamProcessor::new_with_format(options, format);
+        let mut output = String::new();
+        let split = 65536.min(html.len());
+        assert!(html.is_char_boundary(split));
+        output.push_str(&processor.process_chunk(&html[..split]));
+        output.push_str(&processor.process_chunk(&html[split..]));
+        output.push_str(&processor.finish());
+        assert_eq!(
+          output, expected.markdown,
+          "format={format:?} offset={offset} cap={cap}"
+        );
+        assert_eq!(
+          processor.truncated(),
+          expected.truncated,
+          "format={format:?} offset={offset} cap={cap}"
+        );
+      }
+    }
+  }
+}
+
+#[test]
 fn html_stream_keeps_space_after_inline_element() {
   for html in [
     "a<br> b",
