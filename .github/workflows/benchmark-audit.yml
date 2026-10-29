@@ -52,7 +52,7 @@ jobs:
         with:
           tool: wasm-pack,wasm-opt
 
-      - name: Pin all four source trees and the unchanged harness
+      - name: Pin source trees, the independent rebuild, and the unchanged harness
         shell: bash
         run: |
           set -euo pipefail
@@ -77,6 +77,7 @@ jobs:
             test "$(git -C "$repo" rev-parse "$revision:crates/core/tests/streaming_html_parity.rs")" = 03e4b72ece3426bcbf7132ebf2f2f024717ea185
           done
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/base" "$base"
+          git -C "$repo" worktree add --detach "$AUDIT_ROOT/base-rebuild" "$base"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/main-scalar" "$MAIN_CANDIDATE"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/pr-control" "$control"
           git -C "$repo" worktree add --detach "$AUDIT_ROOT/pr-scalar" "$PR_CANDIDATE"
@@ -133,15 +134,15 @@ jobs:
         run: |
           set -euo pipefail
           for side in main-scalar pr-scalar; do
-            CARGO_TARGET_DIR="$AUDIT_ROOT/$side-test-target" cargo test --manifest-path "$AUDIT_ROOT/$side/crates/Cargo.toml" --workspace --exclude mdream-edge \
+            CARGO_TARGET_DIR="$AUDIT_ROOT/$side-test-target" cargo test --manifest-path "$AUDIT_ROOT/$side/crates/Cargo.toml" --workspace --exclude mdream-edge --locked \
               2>&1 | tee "$AUDIT_ROOT/results/$side-tests.log"
           done
 
-      - name: Build four isolated native and WASM artifacts
+      - name: Build four source variants and an independent identical-source control
         shell: bash
         run: |
           set -euo pipefail
-          for side in base main-scalar pr-control pr-scalar; do
+          for side in base base-rebuild main-scalar pr-control pr-scalar; do
             source="$AUDIT_ROOT/$side"
             dist="$AUDIT_ROOT/$side-dist"
             node "$PERF_DIR/build.ts" "$source" "$dist/rust-perf" \
@@ -149,7 +150,11 @@ jobs:
             CARGO_TARGET_DIR="$dist/wasm-target" node "$source/scripts/build-wasm-edge.mjs" --target web --out-dir "$dist/rust" \
               2>&1 | tee "$AUDIT_ROOT/results/$side-wasm-build.log"
             cp "$dist/rust-perf/build.json" "$AUDIT_ROOT/results/$side-build.json"
+            cp "$dist/rust-perf/harness/Cargo.lock" "$AUDIT_ROOT/results/$side-native-Cargo.lock"
             sha256sum "$dist/rust-perf/cpu" "$dist/rust-perf/alloc" "$dist/rust/mdream_edge.js" "$dist/rust/mdream_edge_bg.wasm" >> "$AUDIT_ROOT/results/artifact-sha256.txt"
+          done
+          for side in base-rebuild main-scalar pr-control pr-scalar; do
+            cmp "$AUDIT_ROOT/results/base-native-Cargo.lock" "$AUDIT_ROOT/results/$side-native-Cargo.lock"
           done
 
       - name: Run serial paired comparisons with unchanged options and thresholds
@@ -157,9 +162,10 @@ jobs:
         run: |
           set -euo pipefail
           cd "$AUDIT_ROOT/pr-scalar"
-          for comparison in main-effect pr-effect remaining-pr-cost; do
+          for comparison in null-build main-effect pr-effect remaining-pr-cost; do
             mkdir -p "$AUDIT_ROOT/results/$comparison"
             case "$comparison" in
+              null-build) first=base; second=base-rebuild ;;
               main-effect) first=base; second=main-scalar ;;
               pr-effect) first=pr-control; second=pr-scalar ;;
               remaining-pr-cost) first=main-scalar; second=pr-scalar ;;
@@ -176,6 +182,12 @@ jobs:
                   "$AUDIT_ROOT/$left-dist" "$AUDIT_ROOT/$right-dist" "$out" 2>&1 | tee "$AUDIT_ROOT/results/$comparison/$filter-$order.log"
                 jq -s -e 'length == 2 and all(.cpu != null) and (map(.cpu) | unique | length == 1)' \
                   "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
+                cpu=$(jq -c '.cpu' "$out/base-rust-perf.json")
+                if [ -f "$AUDIT_ROOT/results/cpu.json" ]; then
+                  test "$cpu" = "$(cat "$AUDIT_ROOT/results/cpu.json")"
+                else
+                  printf '%s\n' "$cpu" > "$AUDIT_ROOT/results/cpu.json"
+                fi
                 if [ "$comparison" != remaining-pr-cost ] || [ "$order" = aa ]; then
                   jq -s -e '.[0].verification == .[1].verification' "$out/base-rust-perf.json" "$out/pr-rust-perf.json" > /dev/null
                 fi
