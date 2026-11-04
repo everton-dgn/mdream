@@ -234,9 +234,11 @@ export function createMarkdownDrain(context: MarkdownStreamContext, _hasPlugins:
     else {
       // The prefix ends before a mutable owner. Its trailing block spacing
       // stays buffered even when that owner sits inside a preformatted block.
+      // A decoded CR is spacing the item and document ends still trim, so it
+      // stays buffered with the spaces and line feeds around it.
       while (stableLength > 0) {
         const code = currentContent.charCodeAt(stableLength - 1)
-        if (code !== 32 && code !== 10)
+        if (code !== 32 && code !== 10 && code !== 13)
           break
         stableLength--
       }

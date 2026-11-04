@@ -116,6 +116,16 @@ describe('streaming parity with the Rust core', () => {
   })
 
   it.each([
+    ['x&#13;', 'x'],
+    ['<ol><li>&#13; </li><li>a&#13;&#13;b</li></ol>', '1.\n2. a\r\rb'],
+    ['<p><strong>x&#13;<br>&#13; </strong></p>', '**x\r  \n**'],
+  ])('holds a decoded CR back with the trailing spacing for %s', async (html, expected) => {
+    expect(convertOnce(html)).toBe(expected)
+    await expectStreamingParity(html)
+    await expectEverySplitParity(html)
+  })
+
+  it.each([
     '<ol><li>one<pre><code>cmd</code></pre></li><li>two</li></ol>',
     '<ul><li>one<pre><code>cmd</code></pre></li><li>two</li></ul>',
     '<ol><li>one<pre><code>a</code></pre></li><li>two</li><li>three</li></ol>',
