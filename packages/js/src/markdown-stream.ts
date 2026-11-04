@@ -234,8 +234,9 @@ export function createMarkdownDrain(context: MarkdownStreamContext, _hasPlugins:
     else {
       // The prefix ends before a mutable owner. Its trailing block spacing
       // stays buffered even when that owner sits inside a preformatted block.
-      // A decoded CR, tab or form feed is spacing the item and document ends
-      // still trim, as one-shot does, so it stays buffered like a space.
+      // A decoded CR, tab, vertical tab or form feed is spacing the item and
+      // document ends still trim, as one-shot does, so it stays buffered like a
+      // space.
       while (stableLength > 0) {
         if (!isAsciiWhitespace(currentContent.charCodeAt(stableLength - 1)))
           break

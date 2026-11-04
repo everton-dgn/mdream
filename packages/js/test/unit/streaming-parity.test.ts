@@ -121,6 +121,7 @@ describe('streaming parity with the Rust core', () => {
     ['<ol><li>&#13; </li><li>a&#13;&#13;b</li></ol>', '1.\n2. a\r\rb'],
     ['<ol><li>&#9; </li><li>a</li></ol>', '1.\n2. a'],
     ['<ol><li>&#12; </li><li>a</li></ol>', '1.\n2. a'],
+    ['<ol><li>&#11; </li><li>a</li></ol>', '1.\n2. a'],
     ['<p><strong>x&#13;<br>&#13; </strong></p>', '**x\r  \n**'],
   ])('holds decoded ASCII whitespace back with the trailing spacing for %s', async (html, expected) => {
     expect(convertOnce(html)).toBe(expected)
